@@ -1,0 +1,36 @@
+name: Version Tagging
+
+# Creates a semantic version tag and GitHub release for production branches.
+
+# This operator-triggered workflow does not deploy application code.
+on: workflow_dispatch
+
+permissions:
+  contents: write
+
+concurrency:
+  # Serialize tag operations to prevent two runs publishing the same version.
+  group: tag-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Create release tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Version calculation needs the complete tag and commit history.
+          fetch-depth: 0
+
+      - name: Determine version
+        id: semver
+        uses: procter-gamble/da-pp-pda-github-actions/composite/common/semver@2edcb2ed8466782ad3b662b0e3d58c30a744236d # main
+
+      - name: Create release tag
+        uses: procter-gamble/da-pp-pda-github-actions/composite/common/create-release-tag@2edcb2ed8466782ad3b662b0e3d58c30a744236d # main
+        with:
+          tag-name: ${{ steps.semver.outputs.semVer }}
+          generate-release-notes: 'true'
+          update-existing: 'false'

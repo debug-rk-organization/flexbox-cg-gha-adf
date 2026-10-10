@@ -1,0 +1,14 @@
+{
+    "name": "WaitPipeline",
+    "properties": {
+        "activities": [
+            {
+                "name": "WaitActivity",
+                "type": "Wait",
+                "typeProperties": {
+                    "waitTimeInSeconds": 10
+                }
+            }
+        ]
+    }
+}

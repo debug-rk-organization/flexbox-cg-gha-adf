@@ -1,0 +1,112 @@
+name: Continuous Delivery
+
+# Runs CI once, then deploys the artifact to environments selected by the pushed branch.
+
+on:
+  push:
+    branches: [main, develop, 'release/**', 'hotfix/**']
+
+jobs:
+  ci:
+    name: Continuous Integration
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci-tasks.yml
+    # Reusable workflows receive no secrets unless they are passed explicitly.
+    secrets: inherit
+
+  deploy:
+    name: Deploy to ${{ matrix.environment }}
+    needs: [ci]
+    # A matrix over an empty array errors, so skip the job when no target is enabled.
+    if: ${{ needs.ci.outputs.deployment_targets != '[]' }}
+    strategy:
+      # One environment failing must not cancel deployments to the others.
+      fail-fast: false
+      matrix:
+        # CI returns the environments this branch is allowed to deploy to.
+        environment: ${{ fromJSON(needs.ci.outputs.deployment_targets) }}
+    # Self-hosted runner: deployment targets are not reachable from hosted runners.
+    runs-on:
+      labels: pg-pgi-4gb-1cpu
+      # DR deployments run on the DR runner group.
+      group: ${{ matrix.environment == 'prod_dr' && 'devx-pgi-dr' || 'devx-pgi' }}
+    # Binds the job to the GitHub Environment holding the approval gate and its vars.
+    environment: ${{ matrix.environment }}
+    permissions:
+      contents: read
+      # Required to mint the OIDC token the deploy script uses to sign in to Azure.
+      id-token: write
+      actions: read
+      deployments: write
+    steps:
+      # The repository is needed here because the deploy script ships in .github/scripts.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Deploys the exact artifact CI built, so released bits are the tested bits.
+      - name: Download artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: artifact-${{ github.run_id }}-${{ github.sha }}
+
+      # The script owns Az module install, OIDC sign-in, and the ARM deployment.
+      - name: Deploy application
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
+          DATA_FACTORY_NAME: ${{ vars.DATA_FACTORY_NAME }}
+          ENVIRONMENT: ${{ matrix.environment }}
+          ARTIFACT_ZIP: app-${{ github.run_id }}-${{ github.sha }}.zip
+        run: |
+          # Extract the artifact to the deploy root.
+          $deployPath = Join-Path $env:RUNNER_TEMP "adf-deploy"
+          if (Test-Path $deployPath) { Remove-Item $deployPath -Recurse -Force }
+          New-Item -ItemType Directory -Path $deployPath | Out-Null
+          Expand-Archive -Path $env:ARTIFACT_ZIP -DestinationPath $deployPath -Force
+
+          Write-Host "Deploying Data Factory to $($env:ENVIRONMENT): $($env:DATA_FACTORY_NAME)"
+          ./.github/scripts/New-DataFactoryDeploy.ps1 `
+            -adfResourceGroup $env:RESOURCE_GROUP `
+            -adfName $env:DATA_FACTORY_NAME `
+            -trigger_version false `
+            -EventTrigger false `
+            -pipelinePath "$deployPath/" `
+            -uatFlag 0 `
+            -envDeployment $env:ENVIRONMENT
+
+      - name: Publish deployment summary
+        if: ${{ always() }}
+        shell: pwsh
+        env:
+          ENVIRONMENT: ${{ matrix.environment }}
+          TARGET_SERVICE: ${{ vars.DATA_FACTORY_NAME }}
+          RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
+          SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          VERSION: ${{ needs.ci.outputs.semver }}
+          INITIATOR: ${{ github.actor }}
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          $lines = @(
+            "## Deployment summary"
+            ""
+            "| Field | Value |"
+            "| --- | --- |"
+            "| Environment | $env:ENVIRONMENT |"
+            "| Target service | $env:TARGET_SERVICE |"
+            "| Resource group | $env:RESOURCE_GROUP |"
+            "| Subscription | $env:SUBSCRIPTION |"
+            "| Version | $env:VERSION |"
+            "| Initiator | $env:INITIATOR |"
+            "| Event | $env:EVENT |"
+            "| Branch | $env:REF_NAME |"
+            "| Commit | $env:COMMIT |"
+            "| Status | $env:JOB_STATUS |"
+          )
+          ($lines -join "`n") | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

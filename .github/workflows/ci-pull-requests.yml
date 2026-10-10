@@ -1,0 +1,22 @@
+name: Pull Request Checks
+
+# Validates pull requests and supports manual CI runs.
+
+# workflow_dispatch allows an engineer to run the same checks on demand.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  # Skip the main-to-develop synchronization PR; validate all other matching PRs.
+  ci:
+    name: Validate and Build
+    if: ${{ !(github.head_ref == 'main' && github.base_ref == 'develop') }}
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    # Reuse the same validation and build implementation used by branch pushes.
+    uses: ./.github/workflows/ci-tasks.yml
+    secrets: inherit
